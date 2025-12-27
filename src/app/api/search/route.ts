@@ -72,13 +72,13 @@ export async function GET(request: NextRequest) {
 
       if (metaInfo && metaInfo.folders) {
         openlistResults = Object.entries(metaInfo.folders)
-          .filter(([key, info]: [string, any]) => {
-            const matchFolder = info.folderName.toLowerCase().includes(query.toLowerCase());
+          .filter(([folderName, info]: [string, any]) => {
+            const matchFolder = folderName.toLowerCase().includes(query.toLowerCase());
             const matchTitle = info.title.toLowerCase().includes(query.toLowerCase());
             return matchFolder || matchTitle;
           })
-          .map(([key, info]: [string, any]) => ({
-            id: key,
+          .map(([folderName, info]: [string, any]) => ({
+            id: folderName,
             source: 'openlist',
             source_name: '私人影库',
             title: info.title,

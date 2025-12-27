@@ -112,7 +112,7 @@ export default function DoubanRecommendations({ doubanId }: DoubanRecommendation
   }
 
   return (
-    <ScrollableRow scrollDistance={600}>
+    <ScrollableRow scrollDistance={600} bottomPadding='pb-2'>
       {recommendations.map((rec) => (
         <div
           key={rec.doubanId}
