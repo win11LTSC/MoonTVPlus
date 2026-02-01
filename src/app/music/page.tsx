@@ -1,0 +1,1069 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+'use client';
+
+import { useRouter } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
+
+interface Song {
+  id: string;
+  name: string;
+  artist: string;
+  album?: string;
+  pic?: string;
+}
+
+interface LyricLine {
+  time: number;
+  text: string;
+}
+
+interface Playlist {
+  id: string;
+  name: string;
+  pic: string;
+  updateFrequency?: string;
+}
+
+export default function MusicPage() {
+  const router = useRouter();
+  const [currentSource, setCurrentSource] = useState<'netease' | 'qq' | 'kuwo'>('netease');
+  const [playlists, setPlaylists] = useState<Playlist[]>([]);
+  const [songs, setSongs] = useState<Song[]>([]);
+  const [currentView, setCurrentView] = useState<'playlists' | 'songs'>('playlists');
+  const [currentPlaylistTitle, setCurrentPlaylistTitle] = useState('');
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [currentSong, setCurrentSong] = useState<Song | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(100);
+  const [quality, setQuality] = useState<'128k' | '320k' | 'flac' | 'flac24bit'>('320k');
+  const [playMode, setPlayMode] = useState<'loop' | 'single' | 'random'>('loop');
+  const [currentSongIndex, setCurrentSongIndex] = useState(-1);
+  const [showPlayer, setShowPlayer] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [showLyrics, setShowLyrics] = useState(false);
+  const [lyrics, setLyrics] = useState<LyricLine[]>([]);
+  const [currentLyricIndex, setCurrentLyricIndex] = useState(-1);
+  const [currentSongUrl, setCurrentSongUrl] = useState('');
+
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const lyricsContainerRef = useRef<HTMLDivElement>(null);
+  const lastSaveTimeRef = useRef<number>(0);
+  const restoredTimeRef = useRef<number>(0);
+
+  // 保存播放状态到 localStorage
+  const savePlayState = () => {
+    if (!currentSong) return;
+
+    const playState = {
+      currentSong,
+      currentSongIndex,
+      songs,
+      currentPlaylistTitle,
+      currentSource,
+      currentView,
+      quality,
+      playMode,
+      volume,
+      currentTime: audioRef.current?.currentTime || 0,
+      currentSongUrl,
+      lyrics,
+    };
+
+    localStorage.setItem('musicPlayState', JSON.stringify(playState));
+  };
+
+  // 从 localStorage 恢复播放状态
+  const restorePlayState = () => {
+    try {
+      const saved = localStorage.getItem('musicPlayState');
+      if (!saved) return;
+
+      const playState = JSON.parse(saved);
+
+      setCurrentSong(playState.currentSong);
+      setCurrentSongIndex(playState.currentSongIndex);
+      setSongs(playState.songs || []);
+      setCurrentPlaylistTitle(playState.currentPlaylistTitle || '');
+      setCurrentSource(playState.currentSource || 'netease');
+      setCurrentView(playState.currentView || 'playlists');
+      setQuality(playState.quality || '320k');
+      setPlayMode(playState.playMode || 'loop');
+      setVolume(playState.volume || 100);
+      setCurrentSongUrl(playState.currentSongUrl || '');
+      setLyrics(playState.lyrics || []);
+
+      // 保存需要恢复的时间点
+      restoredTimeRef.current = playState.currentTime || 0;
+
+      if (playState.currentSong && playState.currentSongUrl) {
+        setShowPlayer(true);
+        // 延迟设置音频源，等待 audio 元素加载
+        setTimeout(() => {
+          if (audioRef.current && playState.currentSongUrl) {
+            audioRef.current.src = playState.currentSongUrl;
+            // currentTime 会在 loadedmetadata 事件中设置
+          }
+        }, 100);
+      }
+    } catch (error) {
+      console.error('恢复播放状态失败:', error);
+    }
+  };
+
+  // 页面加载时恢复播放状态
+  useEffect(() => {
+    restorePlayState();
+  }, []);
+
+  // 监听播放状态变化，自动保存
+  useEffect(() => {
+    if (currentSong) {
+      savePlayState();
+    }
+  }, [currentSong, currentSongIndex, songs, currentPlaylistTitle, currentSource, currentView, quality, playMode, volume, currentSongUrl, lyrics]);
+
+  // 加载排行榜列表
+  const loadPlaylists = async (source: string) => {
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `/api/music?action=method-config&platform=${source}&function=toplists`
+      );
+      const configData = await response.json();
+
+      if (configData.code === 0 && configData.data) {
+        const config = configData.data;
+        const url = new URL(config.url);
+
+        // 添加参数
+        if (config.params) {
+          Object.entries(config.params).forEach(([key, value]) => {
+            url.searchParams.append(key, String(value));
+          });
+        }
+
+        // 通过后端代理请求
+        const proxyResponse = await fetch(
+          `/api/music?action=proxy&url=${encodeURIComponent(url.toString())}`
+        );
+        const data = await proxyResponse.json();
+
+        // 使用 transform 函数处理数据
+        if (config.transform) {
+          try {
+            const transformFn = eval(`(${config.transform})`);
+            const transformed = transformFn(data);
+            setPlaylists(transformed || []);
+          } catch (err) {
+            console.error('Transform 函数执行失败:', err);
+            setPlaylists(data.list || data.data || []);
+          }
+        } else {
+          setPlaylists(data.list || data.data || []);
+        }
+      }
+    } catch (error) {
+      console.error('加载排行榜失败:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 加载歌单详情
+  const loadPlaylist = async (playlistId: string, playlistName: string) => {
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `/api/music?action=method-config&platform=${currentSource}&function=toplist`
+      );
+      const configData = await response.json();
+
+      if (configData.code === 0 && configData.data) {
+        const config = configData.data;
+        let url = config.url;
+
+        // 替换模板变量
+        if (config.params) {
+          const params = new URLSearchParams();
+          Object.entries(config.params).forEach(([key, value]) => {
+            const processedValue = String(value).replace('{{id}}', playlistId);
+            params.append(key, processedValue);
+          });
+          url = `${url}?${params.toString()}`;
+        }
+
+        // 通过后端代理请求
+        const proxyResponse = await fetch(
+          `/api/music?action=proxy&url=${encodeURIComponent(url)}`
+        );
+        const data = await proxyResponse.json();
+
+        // 使用 transform 函数处理数据
+        if (config.transform) {
+          try {
+            const transformFn = eval(`(${config.transform})`);
+            const transformed = transformFn(data);
+            setSongs(transformed || []);
+          } catch (err) {
+            console.error('Transform 函数执行失败:', err);
+            setSongs(data.songs || data.data || []);
+          }
+        } else {
+          setSongs(data.songs || data.data || []);
+        }
+
+        setCurrentPlaylistTitle(playlistName);
+        setCurrentView('songs');
+      }
+    } catch (error) {
+      console.error('加载歌单失败:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 搜索歌曲
+  const searchSongs = async () => {
+    if (!searchKeyword.trim()) return;
+
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `/api/music?action=method-config&platform=${currentSource}&function=search`
+      );
+      const configData = await response.json();
+
+      if (configData.code === 0 && configData.data) {
+        const config = configData.data;
+        let url = config.url;
+
+        // 替换模板变量
+        if (config.params) {
+          const params = new URLSearchParams();
+          Object.entries(config.params).forEach(([key, value]) => {
+            let processedValue = String(value)
+              .replace('{{keyword}}', searchKeyword)
+              .replace('{{page}}', '1')
+              .replace('{{limit}}', '20')
+              .replace('{{pageSize}}', '20');
+
+            // 处理复杂表达式
+            if (processedValue.includes('{{')) {
+              processedValue = processedValue.replace(/\{\{.*?\}\}/g, '0');
+            }
+
+            params.append(key, processedValue);
+          });
+          url = `${url}?${params.toString()}`;
+        }
+
+        // 通过后端代理请求
+        const proxyResponse = await fetch(
+          `/api/music?action=proxy&url=${encodeURIComponent(url)}`
+        );
+        const data = await proxyResponse.json();
+
+        // 使用 transform 函数处理数据
+        if (config.transform) {
+          try {
+            const transformFn = eval(`(${config.transform})`);
+            const transformed = transformFn(data);
+            setSongs(transformed || []);
+          } catch (err) {
+            console.error('Transform 函数执行失败:', err);
+            setSongs(data.songs || data.data || []);
+          }
+        } else {
+          setSongs(data.songs || data.data || []);
+        }
+
+        setCurrentPlaylistTitle(`搜索: ${searchKeyword}`);
+        setCurrentView('songs');
+      }
+    } catch (error) {
+      console.error('搜索失败:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 播放歌曲
+  const playSong = async (song: Song, index: number) => {
+    try {
+      // 先设置当前歌曲和显示播放器
+      setCurrentSong(song);
+      setCurrentSongIndex(index);
+      setShowPlayer(true);
+      setLyrics([]); // 清空旧歌词
+
+      // 调用解析接口获取播放链接
+      const response = await fetch('/api/music', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'parse',
+          platform: currentSource,
+          ids: song.id,
+          quality: quality,
+        }),
+      });
+
+      const data = await response.json();
+      console.log('解析返回数据:', data);
+
+      // TuneHub 返回格式: { code: 0, data: { data: [...] } }
+      if (data.code === 0 && data.data?.data && data.data.data.length > 0) {
+        const songData = data.data.data[0];
+
+        if (songData.url && songData.success) {
+          // 更新歌曲信息，包括封面
+          if (songData.cover) {
+            setCurrentSong({
+              ...song,
+              pic: songData.cover,
+            });
+          }
+
+          // 解析歌词 - 字段名是 lyrics
+          if (songData.lyrics) {
+            const parsedLyrics = parseLyric(songData.lyrics);
+            setLyrics(parsedLyrics);
+          }
+
+          // 保存歌曲URL用于下载
+          setCurrentSongUrl(songData.url);
+
+          if (audioRef.current) {
+            audioRef.current.src = songData.url;
+            audioRef.current.play().catch(err => {
+              console.error('播放失败:', err);
+            });
+            setIsPlaying(true);
+          }
+        } else {
+          console.error('无法获取播放链接，songData:', songData);
+        }
+      } else {
+        console.error('解析失败，完整响应:', data);
+      }
+    } catch (error) {
+      console.error('播放失败:', error);
+    }
+  };
+
+  // 解析歌词文本
+  const parseLyric = (lyricText: string): LyricLine[] => {
+    if (!lyricText) return [];
+
+    const lines = lyricText.split('\n');
+    const lyricLines: LyricLine[] = [];
+
+    // 匹配 [mm:ss.xx] 或 [mm:ss] 格式
+    const timeRegex = /\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\]/g;
+
+    lines.forEach(line => {
+      const matches = [...line.matchAll(timeRegex)];
+      if (matches.length > 0) {
+        // 提取歌词文本（去掉所有时间标签）
+        const text = line.replace(timeRegex, '').trim();
+        if (text) {
+          // 一行可能有多个时间标签
+          matches.forEach(match => {
+            const minutes = parseInt(match[1]);
+            const seconds = parseInt(match[2]);
+            const milliseconds = match[3] ? parseInt(match[3].padEnd(3, '0')) : 0;
+            const time = minutes * 60 + seconds + milliseconds / 1000;
+            lyricLines.push({ time, text });
+          });
+        }
+      }
+    });
+
+    // 按时间排序
+    return lyricLines.sort((a, b) => a.time - b.time);
+  };
+
+  // 切换播放/暂停
+  const togglePlay = () => {
+    if (audioRef.current) {
+      if (isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+        // 暂停时保存状态
+        savePlayState();
+      } else {
+        audioRef.current.play().catch(err => {
+          console.error('播放失败:', err);
+        });
+        setIsPlaying(true);
+      }
+    }
+  };
+
+  // 上一曲
+  const playPrev = () => {
+    if (currentSongIndex > 0) {
+      playSong(songs[currentSongIndex - 1], currentSongIndex - 1);
+    }
+  };
+
+  // 下一曲
+  const playNext = () => {
+    if (currentSongIndex < songs.length - 1) {
+      playSong(songs[currentSongIndex + 1], currentSongIndex + 1);
+    }
+  };
+
+  // 切换音质
+  const cycleQuality = () => {
+    const qualities: Array<'128k' | '320k' | 'flac' | 'flac24bit'> = ['128k', '320k', 'flac', 'flac24bit'];
+    const currentIndex = qualities.indexOf(quality);
+    const nextIndex = (currentIndex + 1) % qualities.length;
+    setQuality(qualities[nextIndex]);
+  };
+
+  // 切换播放模式
+  const toggleMode = () => {
+    const modes: Array<'loop' | 'single' | 'random'> = ['loop', 'single', 'random'];
+    const currentIndex = modes.indexOf(playMode);
+    const nextIndex = (currentIndex + 1) % modes.length;
+    setPlayMode(modes[nextIndex]);
+  };
+
+  // 返回
+  const goBack = () => {
+    if (currentView === 'songs') {
+      setCurrentView('playlists');
+      setSongs([]);
+    } else {
+      router.back();
+    }
+  };
+
+  // 下载歌曲
+  const downloadSong = () => {
+    if (!currentSongUrl || !currentSong) return;
+
+    // 创建一个临时的 a 标签来触发下载
+    const link = document.createElement('a');
+    link.href = currentSongUrl;
+    link.download = `${currentSong.name} - ${currentSong.artist}.mp3`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // 切换平台
+  const switchSource = (source: 'netease' | 'qq' | 'kuwo') => {
+    setCurrentSource(source);
+    setCurrentView('playlists');
+    setSongs([]);
+    setSearchKeyword('');
+  };
+
+  // 音频事件监听
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const handleTimeUpdate = () => {
+      setCurrentTime(audio.currentTime);
+
+      // 更新当前歌词索引
+      if (lyrics.length > 0) {
+        let index = -1;
+        for (let i = 0; i < lyrics.length; i++) {
+          if (lyrics[i].time <= audio.currentTime) {
+            index = i;
+          } else {
+            break;
+          }
+        }
+        setCurrentLyricIndex(index);
+      }
+
+      // 每20秒保存一次播放进度
+      const now = Date.now();
+      if (now - lastSaveTimeRef.current > 20000) {
+        lastSaveTimeRef.current = now;
+        savePlayState();
+      }
+    };
+
+    const handleLoadedMetadata = () => {
+      // 恢复播放进度
+      if (restoredTimeRef.current > 0) {
+        audio.currentTime = restoredTimeRef.current;
+        restoredTimeRef.current = 0; // 清除标记
+      }
+    };
+
+    const handleDurationChange = () => setDuration(audio.duration);
+    const handleEnded = () => {
+      if (playMode === 'single') {
+        audio.currentTime = 0;
+        audio.play();
+      } else if (playMode === 'random') {
+        const randomIndex = Math.floor(Math.random() * songs.length);
+        playSong(songs[randomIndex], randomIndex);
+      } else {
+        playNext();
+      }
+    };
+
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    audio.addEventListener('durationchange', handleDurationChange);
+    audio.addEventListener('ended', handleEnded);
+
+    return () => {
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      audio.removeEventListener('durationchange', handleDurationChange);
+      audio.removeEventListener('ended', handleEnded);
+    };
+  }, [playMode, songs, currentSongIndex, lyrics]);
+
+  // 初始加载
+  useEffect(() => {
+    loadPlaylists(currentSource);
+  }, [currentSource]);
+
+  // 歌词自动滚动
+  useEffect(() => {
+    if (lyricsContainerRef.current && currentLyricIndex >= 0) {
+      const container = lyricsContainerRef.current;
+      const activeLine = container.querySelector(`[data-index="${currentLyricIndex}"]`);
+      if (activeLine) {
+        activeLine.scrollIntoView({
+          behavior: 'smooth',
+          block: 'center',
+        });
+      }
+    }
+  }, [currentLyricIndex]);
+
+  // 搜索框回车
+  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      searchSongs();
+    }
+  };
+
+  // 进度条拖动
+  const handleProgressChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newTime = (parseFloat(e.target.value) / 100) * duration;
+    if (audioRef.current) {
+      audioRef.current.currentTime = newTime;
+    }
+  };
+
+  // 音量调节
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newVolume = parseInt(e.target.value);
+    setVolume(newVolume);
+    if (audioRef.current) {
+      audioRef.current.volume = newVolume / 100;
+    }
+  };
+
+  const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+
+  const getQualityLabel = () => {
+    switch (quality) {
+      case '128k': return '标准';
+      case '320k': return 'HQ';
+      case 'flac': return 'SQ';
+      case 'flac24bit': return 'HR';
+    }
+  };
+
+  const getSourceLabel = () => {
+    switch (currentSource) {
+      case 'netease': return '网易云';
+      case 'qq': return 'QQ音乐';
+      case 'kuwo': return '酷我';
+    }
+  };
+
+  const formatTime = (seconds: number) => {
+    if (isNaN(seconds) || seconds === 0) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-white">
+      {/* Header */}
+      <header className="fixed top-0 left-0 right-0 z-40 bg-zinc-950/95 backdrop-blur-md border-b border-white/10 px-4 md:px-6">
+        <div className="w-full mx-auto flex flex-col md:flex-row md:items-center md:justify-between gap-3 md:gap-4 py-3">
+          <div className="flex items-center justify-between md:justify-start md:gap-6 w-full md:w-auto">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => router.push('/')}
+                className="w-8 h-8 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/20 text-white transition-colors"
+                title="返回首页"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                </svg>
+              </button>
+              <div className="w-8 h-8 rounded-full flex items-center justify-center bg-white/10 text-green-500">
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
+                </svg>
+              </div>
+              <span className="font-bold text-lg text-white">音乐</span>
+            </div>
+            <div className="flex bg-white/5 rounded-lg p-1 gap-1 border border-white/5">
+              <button
+                onClick={() => switchSource('netease')}
+                className={`px-3 py-1 md:px-4 rounded text-[10px] font-bold tracking-wider transition-all ${
+                  currentSource === 'netease'
+                    ? 'bg-green-500 text-white border border-white/30 shadow-lg shadow-green-500/50'
+                    : 'text-zinc-400 border border-transparent'
+                }`}
+              >
+                NET
+              </button>
+              <button
+                onClick={() => switchSource('qq')}
+                className={`px-3 py-1 md:px-4 rounded text-[10px] font-bold tracking-wider transition-all ${
+                  currentSource === 'qq'
+                    ? 'bg-green-500 text-white border border-white/30 shadow-lg shadow-green-500/50'
+                    : 'text-zinc-400 border border-transparent'
+                }`}
+              >
+                QQ
+              </button>
+              <button
+                onClick={() => switchSource('kuwo')}
+                className={`px-3 py-1 md:px-4 rounded text-[10px] font-bold tracking-wider transition-all ${
+                  currentSource === 'kuwo'
+                    ? 'bg-green-500 text-white border border-white/30 shadow-lg shadow-green-500/50'
+                    : 'text-zinc-400 border border-transparent'
+                }`}
+              >
+                酷我
+              </button>
+            </div>
+          </div>
+          <div className="flex items-center w-full md:flex-1 md:max-w-md md:ml-auto h-10 md:h-9 gap-2">
+            {currentView === 'songs' && (
+              <button
+                onClick={goBack}
+                className="w-10 h-full rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white border border-white/10"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+            )}
+            <div className="relative group w-full h-full">
+              <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                <svg className="w-4 h-4 text-zinc-500 group-focus-within:text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+              <input
+                type="text"
+                value={searchKeyword}
+                onChange={(e) => setSearchKeyword(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+                className="w-full h-full bg-black/30 border border-white/10 rounded-lg pl-9 pr-4 text-sm text-white focus:outline-none focus:border-green-500 focus:ring-2 focus:ring-green-500/50 font-mono placeholder-zinc-500"
+                placeholder="搜索歌曲或艺术家..."
+              />
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="pt-[120px] md:pt-[96px] pb-32 px-4 md:px-6">
+        <div className="max-w-7xl mx-auto">
+          {loading && (
+            <div className="text-center text-zinc-500 py-8">加载中...</div>
+          )}
+
+          {/* Playlists View */}
+          {currentView === 'playlists' && !loading && (
+            <div>
+              <div className="flex items-center justify-between mb-6 border-b border-white/5 pb-2">
+                <h2 className="text-xs font-mono text-white/50 tracking-widest">排行榜</h2>
+                <span className="text-[10px] font-bold bg-white/10 px-2 py-0.5 rounded text-white">
+                  {getSourceLabel()}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                {playlists.map((playlist) => (
+                  <div
+                    key={playlist.id}
+                    onClick={() => loadPlaylist(playlist.id, playlist.name)}
+                    className="cursor-pointer group"
+                  >
+                    <div className="relative aspect-square rounded-lg overflow-hidden mb-2 bg-white/5">
+                      {playlist.pic && (
+                        <img
+                          src={playlist.pic}
+                          alt={playlist.name}
+                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+                        />
+                      )}
+                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                        <svg className="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                        </svg>
+                      </div>
+                    </div>
+                    <h3 className="text-sm font-medium text-white/80 truncate">{playlist.name}</h3>
+                    {playlist.updateFrequency && (
+                      <p className="text-xs text-zinc-500 mt-1">{playlist.updateFrequency}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Songs View */}
+          {currentView === 'songs' && !loading && (
+            <div>
+              <div className="flex items-center justify-between mb-6 border-b border-white/5 pb-2">
+                <h2 className="text-xl font-bold text-white/80 tracking-tight truncate max-w-md">
+                  {currentPlaylistTitle}
+                </h2>
+                <span className="text-[10px] font-bold bg-white/10 px-2 py-0.5 rounded text-white shrink-0">
+                  {songs.length} 首歌曲
+                </span>
+              </div>
+              <div className="space-y-1">
+                {songs.map((song, index) => (
+                  <div
+                    key={`${song.id}-${index}`}
+                    onClick={() => playSong(song, index)}
+                    className={`grid grid-cols-[40px_1fr_auto] md:grid-cols-[50px_2fr_1fr_auto] gap-2 px-3 py-3 rounded-lg cursor-pointer transition-all ${
+                      currentSongIndex === index
+                        ? 'bg-white/12 border-l-2 border-green-500'
+                        : 'hover:bg-white/5'
+                    }`}
+                  >
+                    <div className="text-center text-zinc-500 text-sm">{index + 1}</div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-white truncate">{song.name}</div>
+                      <div className="text-xs text-zinc-500 truncate md:hidden">{song.artist}</div>
+                    </div>
+                    <div className="hidden md:block text-sm text-zinc-400 truncate">{song.artist}</div>
+                    <div className="text-xs text-zinc-600">{getSourceLabel()}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* Player */}
+      {showPlayer && currentSong && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[95%] max-w-3xl z-50">
+          <div className="bg-zinc-900/95 backdrop-blur-md rounded-xl p-4 border border-white/10 shadow-2xl">
+            {/* Progress Bar */}
+            <div className="absolute top-0 left-0 right-0 h-1 bg-white/10 rounded-t-xl overflow-hidden">
+              <div
+                className="h-full bg-green-500 transition-all pointer-events-none"
+                style={{ width: `${progress}%` }}
+              />
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={progress}
+                onChange={handleProgressChange}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 mt-2">
+              {/* Song Info */}
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div
+                  className="w-12 h-12 rounded-lg bg-zinc-800 overflow-hidden shrink-0 flex items-center justify-center cursor-pointer hover:opacity-80 transition-opacity"
+                  onClick={() => setShowLyrics(true)}
+                >
+                  {currentSong.pic ? (
+                    <img
+                      src={currentSong.pic}
+                      alt={currentSong.name}
+                      className="w-full h-full object-cover"
+                      onError={(e) => {
+                        // 图片加载失败时显示默认图标
+                        e.currentTarget.style.display = 'none';
+                      }}
+                    />
+                  ) : (
+                    <svg className="w-6 h-6 text-zinc-600" fill="currentColor" viewBox="0 0 20 20">
+                      <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
+                    </svg>
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-white truncate">{currentSong.name}</div>
+                  <div className="text-xs text-zinc-500 truncate">{currentSong.artist}</div>
+                </div>
+              </div>
+
+              {/* Controls */}
+              <div className="flex items-center gap-4">
+                <button onClick={playPrev} className="text-zinc-500 hover:text-white transition-colors">
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={togglePlay}
+                  className="w-10 h-10 rounded-full bg-green-500 text-white flex items-center justify-center hover:bg-green-600 transition-colors"
+                >
+                  {isPlaying ? (
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
+                  )}
+                </button>
+                <button onClick={playNext} className="text-zinc-500 hover:text-white transition-colors">
+                  <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* Right Controls */}
+              <div className="flex items-center gap-3">
+                <div className="hidden sm:flex items-center gap-2">
+                  <input
+                    type="range"
+                    value={volume}
+                    onChange={handleVolumeChange}
+                    className="w-16 h-1 bg-white/10 rounded-full appearance-none cursor-pointer"
+                  />
+                </div>
+                <button
+                  onClick={downloadSong}
+                  className="text-zinc-500 hover:text-white transition-colors"
+                  title="下载歌曲"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                </button>
+                <button
+                  onClick={cycleQuality}
+                  className="px-2 py-0.5 rounded border text-amber-400 border-amber-500/50 bg-amber-900/20 text-[9px] font-mono min-w-[32px] text-center"
+                >
+                  {getQualityLabel()}
+                </button>
+                <button
+                  onClick={toggleMode}
+                  className="text-zinc-500 hover:text-white transition-colors"
+                  title={playMode === 'loop' ? '列表循环' : playMode === 'single' ? '单曲循环' : '随机播放'}
+                >
+                  {playMode === 'loop' && (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  )}
+                  {playMode === 'single' && (
+                    <div className="relative w-4 h-4">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">1</span>
+                    </div>
+                  )}
+                  {playMode === 'random' && (
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/>
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Audio Element */}
+      <audio ref={audioRef} className="hidden" />
+
+      {/* Lyrics Modal */}
+      {showLyrics && currentSong && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl h-[90vh] md:h-auto max-h-[90vh] bg-zinc-900/95 rounded-2xl overflow-hidden border border-white/10 shadow-2xl flex flex-col">
+            {/* Header */}
+            <div className="relative h-32 md:h-48 bg-gradient-to-b from-zinc-800 to-zinc-900 shrink-0">
+              {currentSong.pic && (
+                <div className="absolute inset-0">
+                  <img
+                    src={currentSong.pic}
+                    alt={currentSong.name}
+                    className="w-full h-full object-cover opacity-30 blur-xl"
+                  />
+                </div>
+              )}
+              <div className="relative h-full flex flex-col items-center justify-center p-4 md:p-6">
+                <button
+                  onClick={() => setShowLyrics(false)}
+                  className="absolute top-2 right-2 md:top-4 md:right-4 w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center transition-colors"
+                >
+                  <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+                <div className="w-16 h-16 md:w-24 md:h-24 rounded-xl overflow-hidden shadow-2xl mb-2 md:mb-4">
+                  {currentSong.pic ? (
+                    <img
+                      src={currentSong.pic}
+                      alt={currentSong.name}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-zinc-800 flex items-center justify-center">
+                      <svg className="w-8 h-8 md:w-12 md:h-12 text-zinc-600" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M18 3a1 1 0 00-1.196-.98l-10 2A1 1 0 006 5v9.114A4.369 4.369 0 005 14c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V7.82l8-1.6v5.894A4.37 4.37 0 0015 12c-1.657 0-3 .895-3 2s1.343 2 3 2 3-.895 3-2V3z" />
+                      </svg>
+                    </div>
+                  )}
+                </div>
+                <h2 className="text-base md:text-xl font-bold text-white text-center mb-1 line-clamp-1">{currentSong.name}</h2>
+                <p className="text-xs md:text-sm text-zinc-400 line-clamp-1">{currentSong.artist}</p>
+              </div>
+            </div>
+
+            {/* Lyrics Content */}
+            <div ref={lyricsContainerRef} className="flex-1 overflow-y-auto p-4 md:p-6">
+              {lyrics.length > 0 ? (
+                <div className="space-y-4">
+                  {lyrics.map((line, index) => (
+                    <div
+                      key={index}
+                      data-index={index}
+                      className={`text-center transition-all duration-300 ${
+                        index === currentLyricIndex
+                          ? 'text-white text-lg font-bold scale-110'
+                          : index === currentLyricIndex - 1 || index === currentLyricIndex + 1
+                          ? 'text-zinc-400 text-base'
+                          : 'text-zinc-600 text-sm'
+                      }`}
+                    >
+                      {line.text}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center space-y-4">
+                  <p className="text-zinc-500 text-sm">暂无歌词</p>
+                  <p className="text-zinc-600 text-xs">纯音乐或歌词获取失败</p>
+                </div>
+              )}
+            </div>
+
+            {/* Mini Player Controls */}
+            <div className="border-t border-white/5 p-3 md:p-4 shrink-0">
+              {/* 上排：播放控制按钮 */}
+              <div className="flex items-center justify-center gap-4 md:gap-6 mb-2 md:mb-3">
+                <button onClick={playPrev} className="text-zinc-500 hover:text-white transition-colors">
+                  <svg className="w-5 h-5 md:w-6 md:h-6" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={togglePlay}
+                  className="w-10 h-10 md:w-12 md:h-12 rounded-full bg-green-500 text-white flex items-center justify-center hover:bg-green-600 transition-colors"
+                >
+                  {isPlaying ? (
+                    <svg className="w-4 h-4 md:w-5 md:h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4 md:w-5 md:h-5 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M8 5v14l11-7z" />
+                    </svg>
+                  )}
+                </button>
+                <button onClick={playNext} className="text-zinc-500 hover:text-white transition-colors">
+                  <svg className="w-5 h-5 md:w-6 md:h-6" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" />
+                  </svg>
+                </button>
+              </div>
+
+              {/* 下排：其他按钮（小一号） */}
+              <div className="flex items-center justify-center gap-3 md:gap-4 mb-2 md:mb-3">
+                <button
+                  onClick={downloadSong}
+                  className="text-zinc-500 hover:text-white transition-colors"
+                  title="下载歌曲"
+                >
+                  <svg className="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                  </svg>
+                </button>
+                <button
+                  onClick={toggleMode}
+                  className="text-zinc-500 hover:text-white transition-colors"
+                  title={playMode === 'loop' ? '列表循环' : playMode === 'single' ? '单曲循环' : '随机播放'}
+                >
+                  {playMode === 'loop' && (
+                    <svg className="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  )}
+                  {playMode === 'single' && (
+                    <div className="relative w-4 h-4 md:w-5 md:h-5">
+                      <svg className="w-4 h-4 md:w-5 md:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      <span className="absolute inset-0 flex items-center justify-center text-[7px] md:text-[8px] font-bold">1</span>
+                    </div>
+                  )}
+                  {playMode === 'random' && (
+                    <svg className="w-4 h-4 md:w-5 md:h-5" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/>
+                    </svg>
+                  )}
+                </button>
+              </div>
+
+              {/* 进度条 */}
+              <div>
+                <div className="flex items-center gap-2 text-xs text-zinc-500">
+                  <span>{formatTime(currentTime)}</span>
+                  <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden relative">
+                    <div
+                      className="h-full bg-green-500 transition-all pointer-events-none"
+                      style={{ width: `${progress}%` }}
+                    />
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={progress}
+                      onChange={handleProgressChange}
+                      className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    />
+                  </div>
+                  <span>{formatTime(duration)}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
